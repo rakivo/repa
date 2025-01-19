@@ -3,9 +3,6 @@ name = "kmp"
 version = "0.1.0"
 edition = "2021"
 
-[features]
-dir_rec_stop_on_error = []
-
 [dependencies]
 rayon = "=1.10.0"
 memmap2 = "=0.9.5"

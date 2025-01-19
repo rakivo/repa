@@ -36,7 +36,6 @@ impl DirRec {
     }
 }
 
-#[cfg(not(feature = "dir_rec_stop_on_error"))]
 impl Iterator for DirRec {
     type Item = PathBuf;
 
@@ -48,23 +47,6 @@ impl Iterator for DirRec {
                     self.stack.push_back(e.path())
                 }),
                 Err(e) => eprintln!("ERROR: {e}")
-            }
-        } None
-    }
-}
-
-#[cfg(feature = "dir_rec_stop_on_error")]
-impl Iterator for DirRec {
-    type Item = std::io::Result::<PathBuf>;
-
-    fn next(&mut self) -> Option::<Self::Item> {
-        while let Some(p) = self.stack.pop_front() {
-            if p.is_file() { return Some(Ok(p)) }
-            match read_dir(&p) {
-                Ok(es) => es.filter_map(Result::ok).for_each(|e| {
-                    self.stack.push_back(e.path())
-                }),
-                Err(e) => return Some(Err(e))
             }
         } None
     }
