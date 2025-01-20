@@ -1,6 +1,5 @@
 use std::env;
 use std::fs::File;
-use std::path::Path;
 use std::fmt::Display;
 use std::process::ExitCode;
 use std::io::{self, Write, BufWriter};
@@ -25,8 +24,7 @@ impl Display for Loc {
 
 impl Loc {
     #[inline(always)]
-    fn new(file_path: &Path, row: usize, col: usize) -> Self {
-        let file_path = file_path.display();
+    fn new(file_path: &String, row: usize, col: usize) -> Self {
         Self(format!("{file_path}:{row}:{col}:\n"))
     }
 
@@ -70,10 +68,10 @@ fn search(needle: &str, haystack: &[u8], lps: &Lps) -> Vec::<(usize, usize)> {
     let mut ret = Vec::new();
     while i < n {
         if haystack[i] == b'\n' {
-            row += 1;
-            col = 1;
             i += 1;
-            continue;
+            col = 1;
+            row += 1;
+            continue
         }
 
         if haystack[i] == needle[j] {
@@ -114,16 +112,14 @@ fn main() -> ExitCode {
             let file = File::open(&e).unwrap();
             let mmap = unsafe { Mmap::map(&file).ok()? };
             Some((e, mmap))
-        }).fold(|| Vec::new(), |mut locs, (e, haystack)| {
-            let path = e.as_path();
-            let haystack = &haystack[..];
+        }).flat_map(|(e, mmap)| {
+            let haystack = &mmap[..];
             let matches = search(pat, haystack, &lps);
-            locs.extend(matches.into_iter().map(|(row, col)| {
-                Loc::new(path, row, col)
-            })); locs
-        }).reduce(Vec::new, |mut acc, locs| {
-            acc.extend(locs); acc
-        });
+            let path = e.as_path().to_string_lossy().to_string();
+            matches.into_iter().map(move |(row, col)| {
+                Loc::new(&path, row, col)
+            }).par_bridge()
+        }).collect::<Vec::<_>>();
 
     let mut stdout = BufWriter::new(io::stdout());
     results.iter().for_each(|loc| {
