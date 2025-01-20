@@ -24,8 +24,6 @@ impl Display for Loc {
 }
 
 impl Loc {
-    const AVG_LINE_SIZE: usize = 32;
-
     #[inline(always)]
     fn new(file_path: &Path, row: usize, col: usize) -> Self {
         let file_path = file_path.display();
@@ -35,43 +33,6 @@ impl Loc {
     #[inline(always)]
     fn as_bytes(&self) -> &[u8] {
         self.0.as_bytes()
-    }
-
-    // O(index)
-    #[inline]
-    fn from_bytes(bytes: &[u8], index: usize, file_path: &Path) -> Self {
-        let mut row = 1;
-        let mut last_newline = 0;
-        bytes.iter().enumerate().take(index + 1).filter(|(.., c)| **c == b'\n').for_each(|(i, ..)| {
-            row += 1;
-            last_newline = i + 1
-        });
-        Self::new(file_path, row, index - last_newline + 1)
-    }
-
-    #[inline(always)]
-    fn is_precomputation_needed(file_size: usize, matches_len: usize) -> bool {
-        file_size / (Self::AVG_LINE_SIZE * (file_size as f64).log2() as usize) >= matches_len
-    }
-
-    // O(n)
-    fn precompute(haystack: &[u8]) -> Vec::<usize> {
-        let mut line_starts = vec![0];
-        line_starts.extend(haystack.iter().enumerate().filter(|(.., c)| **c == b'\n').map(|(i, ..)| {
-            i + 1
-        })); line_starts
-    }
-
-    // O(log lines_count)
-    #[inline]
-    fn from_precomputed(line_starts: &[usize], index: usize, file_path: &Path) -> Self {
-        let (row, col) = if let Some(line_number) = line_starts.binary_search_by(|&start| start.cmp(&index)).err() {
-            let line_start = line_starts[line_number - 1];
-            (line_number, index - line_start + 1)
-        } else {
-            (1, index + 1)
-        };
-        Self::new(file_path, row, col)
     }
 }
 
@@ -96,7 +57,7 @@ fn construct_lps(pat: &str) -> Lps {
     } lps
 }
 
-fn search(needle: &str, haystack: &[u8], lps: &Lps) -> Vec::<usize> {
+fn search(needle: &str, haystack: &[u8], lps: &Lps) -> Vec::<(usize, usize)> {
     let n = haystack.len();
     let m = needle.len();
 
@@ -104,19 +65,30 @@ fn search(needle: &str, haystack: &[u8], lps: &Lps) -> Vec::<usize> {
 
     let mut i = 0;
     let mut j = 0;
+    let mut row = 1;
+    let mut col = 1;
     let mut ret = Vec::new();
     while i < n {
+        if haystack[i] == b'\n' {
+            row += 1;
+            col = 1;
+            i += 1;
+            continue;
+        }
+
         if haystack[i] == needle[j] {
             i += 1;
             j += 1;
+            col += 1;
             if j == m {
-                ret.push(i - j);
+                ret.push((row, col - m));
                 j = lps[j - 1]
             }
         } else if j != 0 {
             j = lps[j - 1]
         } else {
-            i += 1
+            i += 1;
+            col += 1
         }
     } ret
 }
@@ -124,16 +96,16 @@ fn search(needle: &str, haystack: &[u8], lps: &Lps) -> Vec::<usize> {
 fn main() -> ExitCode {
     let args = env::args().collect::<Vec::<_>>();
     if args.len() < 3 {
-        eprintln!("usage: {program} <needletern> <directory to search in>", program = args[0]);
+        eprintln!("usage: {program} <pattern> <directory to search in>", program = args[0]);
         return ExitCode::FAILURE
     }
 
-    let ref dir_path = args[1];
-    let dir = DirRec::new(dir_path);
-
     // construct the Longest Prefix Suffix for the `KMP` algorithm
-    let ref pat = args[2];
+    let ref pat = args[1];
     let lps = construct_lps(pat);
+
+    let ref dir_path = args[2];
+    let dir = DirRec::new(dir_path);
 
     let results = dir.into_iter()
         .par_bridge()
@@ -146,17 +118,12 @@ fn main() -> ExitCode {
             let path = e.as_path();
             let haystack = &haystack[..];
             let matches = search(pat, haystack, &lps);
-            if Loc::is_precomputation_needed(haystack.len(), matches.len()) {
-                locs.extend(matches.into_iter().map(|index| {
-                    Loc::from_bytes(haystack, index, path)
-                }))
-            } else {
-                let ls = Loc::precompute(haystack);
-                locs.extend(matches.into_iter().map(|index| {
-                    Loc::from_precomputed(&ls, index, path)
-                }))
-            } locs
-        }).reduce(Vec::new, |_, locs| locs);
+            locs.extend(matches.into_iter().map(|(row, col)| {
+                Loc::new(path, row, col)
+            })); locs
+        }).reduce(Vec::new, |mut acc, locs| {
+            acc.extend(locs); acc
+        });
 
     let mut stdout = BufWriter::new(io::stdout());
     results.iter().for_each(|loc| {
