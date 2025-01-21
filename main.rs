@@ -1,14 +1,17 @@
 use std::env;
 use std::fs::File;
+use std::ops::Not;
+use std::path::Path;
 use std::fmt::Display;
+use std::os::unix::ffi::OsStrExt;
 use std::process::ExitCode;
-use std::io::{self, Write, BufWriter};
 
 use memmap2::Mmap;
+use dir_rec::DirRec;
 use rayon::prelude::*;
 
-mod dir_rec;
-use dir_rec::DirRec;
+mod exts;
+use exts::*;
 
 type Lps = Vec::<usize>;
 
@@ -24,13 +27,8 @@ impl Display for Loc {
 
 impl Loc {
     #[inline(always)]
-    fn new(file_path: &String, row: usize, col: usize) -> Self {
-        Self(format!("{file_path}:{row}:{col}:\n"))
-    }
-
-    #[inline(always)]
-    fn as_bytes(&self) -> &[u8] {
-        self.0.as_bytes()
+    fn new(file_path: &Path, row: usize, col: usize) -> Self {
+        Self(format!("{file_path:?}:{row}:{col}:"))
     }
 }
 
@@ -55,7 +53,7 @@ fn construct_lps(pat: &str) -> Lps {
     } lps
 }
 
-fn search(needle: &str, haystack: &[u8], lps: &Lps) -> Vec::<(usize, usize)> {
+fn search(needle: &str, haystack: &[u8], lps: &Lps, path: &Path) {
     let n = haystack.len();
     let m = needle.len();
 
@@ -65,7 +63,6 @@ fn search(needle: &str, haystack: &[u8], lps: &Lps) -> Vec::<(usize, usize)> {
     let mut j = 0;
     let mut row = 1;
     let mut col = 1;
-    let mut ret = Vec::new();
     while i < n {
         if haystack[i] == b'\n' {
             i += 1;
@@ -79,7 +76,7 @@ fn search(needle: &str, haystack: &[u8], lps: &Lps) -> Vec::<(usize, usize)> {
             j += 1;
             col += 1;
             if j == m {
-                ret.push((row, col - m));
+                println!("{loc}", loc = Loc::new(path, row, col - m));
                 j = lps[j - 1]
             }
         } else if j != 0 {
@@ -88,7 +85,7 @@ fn search(needle: &str, haystack: &[u8], lps: &Lps) -> Vec::<(usize, usize)> {
             i += 1;
             col += 1
         }
-    } ret
+    }
 }
 
 fn main() -> ExitCode {
@@ -105,26 +102,22 @@ fn main() -> ExitCode {
     let ref dir_path = args[2];
     let dir = DirRec::new(dir_path);
 
-    let results = dir.into_iter()
+    dir.into_iter()
         .par_bridge()
-        .filter(|e| e.as_path().is_file())
-        .filter_map(|e| {
+        .filter(|e| {
+            let path = e.as_path();
+            if !path.is_file() { return false }
+            path.extension()
+                .map(|ext| BINARY_EXTENSIONS.contains(ext.as_bytes()))
+                .unwrap_or(true)
+                .not()
+        }).filter_map(|e| {
             let file = File::open(&e).unwrap();
-            let mmap = unsafe { Mmap::map(&file).ok()? };
+            let mmap = unsafe { Mmap::map(&file) }.ok()?;
             Some((e, mmap))
-        }).flat_map(|(e, mmap)| {
-            let haystack = &mmap[..];
-            let matches = search(pat, haystack, &lps);
-            let path = e.as_path().to_string_lossy().to_string();
-            matches.into_iter().map(move |(row, col)| {
-                Loc::new(&path, row, col)
-            }).par_bridge()
-        }).collect::<Vec::<_>>();
-
-    let mut stdout = BufWriter::new(io::stdout());
-    results.iter().for_each(|loc| {
-        _ = stdout.write_all(loc.as_bytes());
-    });
+        }).for_each(|(e, mmap)| {
+            search(pat, &mmap[..], &lps, e.as_path());
+        });
 
     ExitCode::SUCCESS
 }

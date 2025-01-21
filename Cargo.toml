@@ -4,8 +4,10 @@ version = "0.1.0"
 edition = "2021"
 
 [dependencies]
-rayon = "=1.10.0"
 memmap2 = "=0.9.5"
+rayon = "=1.10.0"
+phf = { version = "=0.11.2", features = ["macros"] }
+dir_rec = "0.1.2"
 
 [[bin]]
 name = "kmp"
