@@ -1,9 +1,9 @@
 use std::env;
 use std::fs::File;
 use std::ops::Not;
-use std::path::Path;
 use std::fmt::Display;
 use std::process::ExitCode;
+use std::path::{Path, PathBuf};
 use std::os::unix::ffi::OsStrExt;
 
 use memmap2::Mmap;
@@ -55,25 +55,38 @@ impl Loc {
     }
 }
 
-#[inline]
-fn search(pattern: &BlockDatabase, scratch: &mut Scratch, haystack: &[u8], path: &Path) {
-    let line_starts = Loc::precompute(haystack);
-    pattern.scan(haystack, scratch, |_, from, _, _| {
-        println!{
-            "{loc}",
-            loc = Loc::from_precomputed(&line_starts, from as _, path)
-        };
-        Matching::Continue
-    }).unwrap();
+struct SearchCtx {
+    scratch: Scratch,
+    pattern_db: BlockDatabase,
+    read_binary: bool
 }
 
-#[inline]
-fn search_binary(pattern: &BlockDatabase, scratch: &mut Scratch, haystack: &[u8], path: &Path) {
-    let file_path = path.display();
-    pattern.scan(haystack, scratch, |_, _, _, _| {
-        println!("binary file matched: {file_path}");
-        Matching::Continue
-    }).unwrap();
+impl SearchCtx {
+    #[inline]
+    fn filter(&self, e: PathBuf) -> Option::<(PathBuf, bool)> {
+        let path = e.as_path();
+        let is_binary = path.extension()
+            .map(|ext| BINARY_EXTENSIONS.contains(ext.as_bytes()))
+            .unwrap_or(true);
+        if is_binary && !self.read_binary {
+            None
+        } else {
+            Some((e, is_binary))
+        }
+    }
+
+    #[inline]
+    fn search(&self, haystack: &[u8], path: &Path, is_binary: bool) {
+        let line_starts = Loc::precompute(haystack);
+        self.pattern_db.scan(haystack, &self.scratch, |_, from, _, _| {
+            println!{
+                "{loc}{isbin}",
+                loc = Loc::from_precomputed(&line_starts, from as _, path),
+                isbin = if is_binary { "[binary]" } else { "" },
+            };
+            Matching::Continue
+        }).unwrap();
+    }
 }
 
 #[inline]
@@ -107,7 +120,13 @@ fn main() -> ExitCode {
         HsFlag::SOM_LEFTMOST
     };
     let pattern_db = pattern.build().unwrap();
-    let mut scratch = pattern_db.alloc_scratch().unwrap();
+    let scratch = pattern_db.alloc_scratch().unwrap();
+
+    let search_ctx = SearchCtx {
+        scratch,
+        pattern_db,
+        read_binary
+    };
 
     let Some(dir_path) = nth_not_starting_with_dash(1, &args) else {
         return ExitCode::FAILURE
@@ -115,27 +134,13 @@ fn main() -> ExitCode {
     let dir = DirRec::new(dir_path);
 
     dir.into_iter()
-        .filter_map(|e| {
-            let path = e.as_path();
-            let is_binary = path.extension()
-                .map(|ext| BINARY_EXTENSIONS.contains(ext.as_bytes()))
-                .unwrap_or(true)
-                .not();
-            if is_binary && !read_binary {
-                None
-            } else {
-                Some((e, is_binary))
-            }
-        }).filter_map(|(e, is_binary)| {
+        .filter_map(|e| search_ctx.filter(e))
+        .filter_map(|(e, is_binary)| {
             let file = File::open(&e).unwrap();
             let mmap = unsafe { Mmap::map(&file) }.ok()?;
             Some((e, mmap, is_binary))
         }).for_each(|(e, mmap, is_binary)| {
-            if is_binary {
-                search_binary(&pattern_db, &mut scratch, &mmap[..], e.as_path())
-            } else {
-                search(&pattern_db, &mut scratch, &mmap[..], e.as_path())
-            }
+            search_ctx.search(&mmap[..], e.as_path(), is_binary)
         });
 
     ExitCode::SUCCESS
