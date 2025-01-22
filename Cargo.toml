@@ -8,3 +8,4 @@ dir_rec = "0.1.2"
 memmap2 = "=0.9.5"
 phf = { version = "=0.11.2", features = ["macros"] }
 hyperscan = { version = "=0.3.2", features = ["v5_4"] }
+flager = "0.0.3"

@@ -1,24 +1,28 @@
 use std::env;
 use std::fs::File;
-use std::fmt::Display;
 use std::ops::Not;
 use std::path::Path;
-use std::os::unix::ffi::OsStrExt;
+use std::fmt::Display;
 use std::process::ExitCode;
+use std::os::unix::ffi::OsStrExt;
 
 use memmap2::Mmap;
 use dir_rec::DirRec;
-use hyperscan::prelude::*;
+use flager::{new_flag, Flag, Parser as FlagParser};
+use hyperscan::{prelude::*, CompileFlags as HsFlag};
 
 mod exts;
 use exts::*;
+
+const READ_BINARY: Flag::<bool> = new_flag!("-b", "--read-binary", false);
+const CASE_SENSITIVE: Flag::<bool> = new_flag!("-c", "--case-sensitive", false);
 
 #[repr(transparent)]
 struct Loc(String);
 
 impl Display for Loc {
     #[inline(always)]
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+    fn fmt(&self, f: &mut std::fmt::Formatter::<'_>) -> std::fmt::Result {
         write!(f, "{loc}", loc = self.0)
     }
 }
@@ -63,41 +67,75 @@ fn search(pattern: &BlockDatabase, scratch: &mut Scratch, haystack: &[u8], path:
     }).unwrap();
 }
 
+#[inline]
+fn search_binary(pattern: &BlockDatabase, scratch: &mut Scratch, haystack: &[u8], path: &Path) {
+    let file_path = path.display();
+    pattern.scan(haystack, scratch, |_, _, _, _| {
+        println!("binary file matched: {file_path}");
+        Matching::Continue
+    }).unwrap();
+}
+
+#[inline]
+fn nth_not_starting_with_dash(n: usize, args: &Vec::<String>) -> Option::<&String> {
+    args[1..].iter().filter(|s| s.starts_with('-').not()).nth(n)
+}
+
 fn main() -> ExitCode {
     let args = env::args().collect::<Vec::<_>>();
     if args.len() < 3 {
         eprintln!{
-            "usage: {program} <pattern> <directory to search in>",
+            "usage: {program} <pattern> <directory to search in> [...flags]",
             program = args[0]
         };
         return ExitCode::FAILURE
     }
 
-    let ref pattern_str = args[1];
+    let flag_parser = FlagParser::new();
+    let read_binary = flag_parser.parse_or_default(&READ_BINARY);
+    let case_sensitive = flag_parser.parse_or_default(&CASE_SENSITIVE);
+
+    let Some(pattern_str) = nth_not_starting_with_dash(0, &args) else {
+        return ExitCode::FAILURE
+    };
+    let mut hsflags = HsFlag::SOM_LEFTMOST;
+    if !case_sensitive {
+        hsflags |= HsFlag::CASELESS
+    }
     let pattern = pattern! {
         pattern_str;
-        hyperscan::CompileFlags::SOM_LEFTMOST
+        HsFlag::SOM_LEFTMOST
     };
     let pattern_db = pattern.build().unwrap();
     let mut scratch = pattern_db.alloc_scratch().unwrap();
 
-    let ref dir_path = args[2];
+    let Some(dir_path) = nth_not_starting_with_dash(1, &args) else {
+        return ExitCode::FAILURE
+    };
     let dir = DirRec::new(dir_path);
 
     dir.into_iter()
-        .filter(|e| {
+        .filter_map(|e| {
             let path = e.as_path();
-            if !path.is_file() { return false }
-            path.extension()
+            let is_binary = path.extension()
                 .map(|ext| BINARY_EXTENSIONS.contains(ext.as_bytes()))
                 .unwrap_or(true)
-                .not()
-        }).filter_map(|e| {
+                .not();
+            if is_binary && !read_binary {
+                None
+            } else {
+                Some((e, is_binary))
+            }
+        }).filter_map(|(e, is_binary)| {
             let file = File::open(&e).unwrap();
             let mmap = unsafe { Mmap::map(&file) }.ok()?;
-            Some((e, mmap))
-        }).for_each(|(e, mmap)| {
-            search(&pattern_db, &mut scratch, &mmap[..], e.as_path());
+            Some((e, mmap, is_binary))
+        }).for_each(|(e, mmap, is_binary)| {
+            if is_binary {
+                search_binary(&pattern_db, &mut scratch, &mmap[..], e.as_path())
+            } else {
+                search(&pattern_db, &mut scratch, &mmap[..], e.as_path())
+            }
         });
 
     ExitCode::SUCCESS
