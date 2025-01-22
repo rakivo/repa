@@ -14,8 +14,18 @@ use hyperscan::{prelude::*, CompileFlags as HsFlag};
 mod exts;
 use exts::*;
 
-const READ_BINARY: Flag::<bool> = new_flag!("-b", "--read-binary", false);
-const CASE_SENSITIVE: Flag::<bool> = new_flag!("-c", "--case-sensitive", false);
+const HELP: Flag = new_flag!("-h", "--help").help("print this text and exit");
+const READ_BINARY: Flag::<bool> = new_flag!("-b", "--read-binary", false).help("do not read binary files");
+const CASE_SENSITIVE: Flag::<bool> = new_flag!("-c", "--case-sensitive", false).help("do case sensitive search");
+
+macro_rules! printdoc {
+    (usage $program: expr) => {
+        println!("usage: {} <pattern> <directory to search in> [...flags]", $program)
+    };
+    (example $program: expr) => {
+        println!("example: {} linear docs.gl", $program)
+    };
+}
 
 #[repr(transparent)]
 struct Loc(String);
@@ -96,17 +106,25 @@ fn nth_not_starting_with_dash(n: usize, args: &Vec::<String>) -> Option::<&Strin
 
 fn main() -> ExitCode {
     let args = env::args().collect::<Vec::<_>>();
+    let ref program = args[0];
+    let flag_parser = FlagParser::new();
+    if flag_parser.passed(&HELP) {
+        printdoc!(usage program);
+        printdoc!(example program);
+        println!("flags:");
+        println!("  {READ_BINARY}");
+        println!("  {CASE_SENSITIVE}");
+        return ExitCode::SUCCESS
+    }
+
     if args.len() < 3 {
-        eprintln!{
-            "usage: {program} <pattern> <directory to search in> [...flags]",
-            program = args[0]
-        };
+        printdoc!(usage program);
+        printdoc!(example program);
         return ExitCode::FAILURE
     }
 
-    let flag_parser = FlagParser::new();
-    let read_binary = flag_parser.parse_or_default(&READ_BINARY);
-    let case_sensitive = flag_parser.parse_or_default(&CASE_SENSITIVE);
+    let read_binary = flag_parser.passed(&READ_BINARY);
+    let case_sensitive = flag_parser.passed(&CASE_SENSITIVE);
 
     let Some(pattern_str) = nth_not_starting_with_dash(0, &args) else {
         return ExitCode::FAILURE
