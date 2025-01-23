@@ -3,9 +3,15 @@ name = "repa"
 version = "0.1.0"
 edition = "2021"
 
+[features]
+default = ["regex"]
+regex = ["dep:regex-automata"]
+hyperscan = ["dep:hyperscan"]
+
 [dependencies]
 flager = "0.0.6"
 dir_rec = "0.1.2"
 memmap2 = "=0.9.5"
 phf = { version = "=0.11.2", features = ["macros"] }
-hyperscan = { version = "=0.3.2", features = ["v5_4"] }
+hyperscan = { version = "=0.3.2", features = ["v5_4"], optional = true }
+regex-automata = { version = "=0.4.9", default-features = false, features = ["dfa", "syntax"], optional = true }

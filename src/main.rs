@@ -9,7 +9,19 @@ use std::os::unix::ffi::OsStrExt;
 use memmap2::Mmap;
 use dir_rec::DirRec;
 use flager::{new_flag, Flag, Parser as FlagParser};
-use hyperscan::{prelude::*, CompileFlags as HsFlag};
+
+#[cfg(feature = "regex")]
+use regex_automata::{
+    Input,
+    nfa::thompson,
+    util::syntax::Config,
+    dfa::{dense, Automaton}
+};
+#[cfg(feature = "hyperscan")]
+use hyperscan::{
+    prelude::*,
+    CompileFlags as HsFlag
+};
 
 mod exts;
 use exts::*;
@@ -65,6 +77,13 @@ impl Loc {
     }
 }
 
+#[cfg(feature = "regex")]
+struct SearchCtx {
+    dfa: dense::DFA::<Vec::<u32>>,
+    read_binary: bool
+}
+
+#[cfg(feature = "hyperscan")]
 struct SearchCtx {
     scratch: Scratch,
     pattern_db: BlockDatabase,
@@ -72,6 +91,33 @@ struct SearchCtx {
 }
 
 impl SearchCtx {
+    #[inline]
+    fn new(pattern_str: &str, read_binary: bool, case_sensitive: bool) -> Self {
+        #[cfg(feature = "hyperscan")] {
+            let mut hsflags = HsFlag::SOM_LEFTMOST;
+            if !case_sensitive {
+                hsflags |= HsFlag::CASELESS
+            }
+            let pattern = pattern! {
+                pattern_str;
+                HsFlag::SOM_LEFTMOST
+            };
+            let pattern_db = pattern.build().unwrap();
+            let scratch = pattern_db.alloc_scratch().unwrap();
+            SearchCtx { scratch, pattern_db, read_binary }
+        }
+
+        #[cfg(feature = "regex")] {
+            let cfg = Config::new().case_insensitive(case_sensitive);
+            let dfa = dense::Builder::new()
+                .syntax(cfg)
+                .thompson(thompson::Config::new().reverse(true))
+                .build(pattern_str)
+                .unwrap();
+            SearchCtx { dfa, read_binary }
+        }
+    }
+
     #[inline]
     fn filter(&self, e: PathBuf) -> Option::<(PathBuf, bool)> {
         let path = e.as_path();
@@ -87,15 +133,45 @@ impl SearchCtx {
 
     #[inline]
     fn search(&self, haystack: &[u8], path: &Path, is_binary: bool) {
-        let line_starts = Loc::precompute(haystack);
-        self.pattern_db.scan(haystack, &self.scratch, |_, from, _, _| {
+        #[inline(always)]
+        fn print_loc(line_starts: &[usize], index: usize, file_path: &Path, is_binary: bool) {
             println!{
                 "{loc}{isbin}",
-                loc = Loc::from_precomputed(&line_starts, from as _, path),
+                loc = Loc::from_precomputed(&line_starts, index, file_path),
                 isbin = if is_binary { "[binary]" } else { "" },
             };
-            Matching::Continue
-        }).unwrap();
+        }
+
+        let line_starts = Loc::precompute(haystack);
+
+        #[cfg(feature = "hyperscan")] {
+            self.pattern_db.scan(haystack, &self.scratch, |_, from, _, _| {
+                print_loc(&line_starts, from as _, path, is_binary);
+                Matching::Continue
+            }).unwrap();
+        }
+
+        #[cfg(feature = "regex")] {
+            let mut input = Input::new(haystack);
+            loop {
+                let Ok(result) = self.dfa.try_search_rev(&input) else {
+                    continue
+                };
+                match result {
+                    None => break,
+                    Some(hm) => {
+                        print_loc(&line_starts, hm.offset(), path, is_binary);
+                        if hm.offset() == 0 || input.end() == 0 {
+                            break
+                        } else if hm.offset() < input.end() {
+                            input.set_end(hm.offset());
+                        } else {
+                            input.set_end(input.end() - 1);
+                        }
+                    }
+                }
+            }
+        }
     }
 }
 
@@ -129,22 +205,7 @@ fn main() -> ExitCode {
     let Some(pattern_str) = nth_not_starting_with_dash(0, &args) else {
         return ExitCode::FAILURE
     };
-    let mut hsflags = HsFlag::SOM_LEFTMOST;
-    if !case_sensitive {
-        hsflags |= HsFlag::CASELESS
-    }
-    let pattern = pattern! {
-        pattern_str;
-        HsFlag::SOM_LEFTMOST
-    };
-    let pattern_db = pattern.build().unwrap();
-    let scratch = pattern_db.alloc_scratch().unwrap();
-
-    let search_ctx = SearchCtx {
-        scratch,
-        pattern_db,
-        read_binary
-    };
+    let search_ctx = SearchCtx::new(pattern_str, read_binary, case_sensitive);
 
     let Some(dir_path) = nth_not_starting_with_dash(1, &args) else {
         return ExitCode::FAILURE
