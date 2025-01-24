@@ -18,17 +18,16 @@ use regex_automata::{
     dfa::{dense, Automaton}
 };
 #[cfg(feature = "hyperscan")]
-use hyperscan::{
-    prelude::*,
-    CompileFlags as HsFlag
-};
+use hyperscan::prelude::*;
 
 mod exts;
 use exts::*;
 
 const HELP: Flag = new_flag!("-h", "--help").help("print this text and exit");
 const READ_BINARY: Flag::<bool> = new_flag!("-b", "--read-binary", false).help("do not read binary files");
+const ENABLE_UNICODE: Flag::<bool> = new_flag!("-u", "--enable-unicode", false).help("enable unicode");
 const CASE_SENSITIVE: Flag::<bool> = new_flag!("-c", "--case-sensitive", false).help("do case sensitive search");
+const MATCH_WHOLE_WORDS: Flag::<bool> = new_flag!("-w", "--whole-words", false).help("match only whole words");
 
 macro_rules! printdoc {
     (usage $program: expr) => {
@@ -66,41 +65,47 @@ impl Loc {
 
     // O(log lines_count)
     #[inline]
-    fn from_precomputed(line_starts: &[usize], index: usize, file_path: &Path) -> Self {
-        let (row, col) = if let Some(line_number) = line_starts.binary_search_by(|&start| start.cmp(&index)).err() {
+    fn from_precomputed(line_starts: &[usize], index: usize, file_path: &Path) -> (Self, usize) {
+        let (row, col, line_number) = if let Some(line_number) = line_starts.binary_search_by(|&start| start.cmp(&index)).err() {
             let line_start = line_starts[line_number - 1];
-            (line_number, index - line_start + 1)
+            (line_number, index - line_start + 1, line_number)
         } else {
-            (1, index + 1)
+            (1, index + 1, 1)
         };
-        Self::new(file_path, row, col)
+        (Self::new(file_path, row, col), line_number)
     }
 }
 
 #[cfg(feature = "regex")]
 struct SearchCtx {
     dfa: dense::DFA::<Vec::<u32>>,
-    read_binary: bool
+    read_binary: bool,
 }
 
 #[cfg(feature = "hyperscan")]
 struct SearchCtx {
     scratch: Scratch,
     pattern_db: BlockDatabase,
-    read_binary: bool
+    read_binary: bool,
 }
 
 impl SearchCtx {
     #[inline]
-    fn new(pattern_str: &str, read_binary: bool, case_sensitive: bool) -> Self {
+    fn new(flag_parser: &FlagParser, pattern_str: &str) -> Self {
+        let read_binary = flag_parser.passed(&READ_BINARY);
+        let case_sensitive = flag_parser.passed(&CASE_SENSITIVE);
+        let match_whole_words = flag_parser.passed(&MATCH_WHOLE_WORDS);
+
         #[cfg(feature = "hyperscan")] {
-            let mut hsflags = HsFlag::SOM_LEFTMOST;
-            if !case_sensitive {
-                hsflags |= HsFlag::CASELESS
-            }
-            let pattern = pattern! {
-                pattern_str;
-                HsFlag::SOM_LEFTMOST
+            let pattern = if match_whole_words {
+                format!("(^|[^a-zA-Z0-9_]){pattern_str}([^a-zA-Z0-9_]|$)")
+            } else {
+                pattern_str.to_owned()
+            };
+            let pattern = if !case_sensitive {
+                pattern!{pattern; SOM_LEFTMOST | CASELESS}
+            } else {
+                pattern!{pattern; SOM_LEFTMOST}
             };
             let pattern_db = pattern.build().unwrap();
             let scratch = pattern_db.alloc_scratch().unwrap();
@@ -108,11 +113,16 @@ impl SearchCtx {
         }
 
         #[cfg(feature = "regex")] {
+            let pattern = if match_whole_words {
+                format!("(?-u)\\b{pattern_str}\\b")
+            } else {
+                pattern_str.to_owned()
+            };
             let cfg = Config::new().case_insensitive(case_sensitive);
             let dfa = dense::Builder::new()
                 .syntax(cfg)
                 .thompson(thompson::Config::new().reverse(true))
-                .build(pattern_str)
+                .build(&pattern)
                 .unwrap();
             SearchCtx { dfa, read_binary }
         }
@@ -132,21 +142,21 @@ impl SearchCtx {
     }
 
     #[inline]
-    fn search(&self, haystack: &[u8], path: &Path, is_binary: bool) {
+    fn search(&self, haystack: &[u8], path: &Path) {
         #[inline(always)]
-        fn print_loc(line_starts: &[usize], index: usize, file_path: &Path, is_binary: bool) {
-            println!{
-                "{loc}{isbin}",
-                loc = Loc::from_precomputed(&line_starts, index, file_path),
-                isbin = if is_binary { "[binary]" } else { "" },
-            };
+        fn print_match(line_starts: &[usize], index: usize, file_path: &Path, haystack: &[u8]) {
+            let (loc, line_number) = Loc::from_precomputed(&line_starts, index, file_path);
+            let line_start = line_starts[line_number - 1];
+            let line_end = line_starts[line_number];
+            let preview = unsafe { std::str::from_utf8_unchecked(&haystack[line_start..line_end - 1]) };
+            println!("{loc}{preview}")
         }
 
         let line_starts = Loc::precompute(haystack);
 
         #[cfg(feature = "hyperscan")] {
             self.pattern_db.scan(haystack, &self.scratch, |_, from, _, _| {
-                print_loc(&line_starts, from as _, path, is_binary);
+                print_match(&line_starts, from as _, path, haystack);
                 Matching::Continue
             }).unwrap();
         }
@@ -160,7 +170,7 @@ impl SearchCtx {
                 match result {
                     None => break,
                     Some(hm) => {
-                        print_loc(&line_starts, hm.offset(), path, is_binary);
+                        print_match(&line_starts, hm.offset(), path, haystack);
                         if hm.offset() == 0 || input.end() == 0 {
                             break
                         } else if hm.offset() < input.end() {
@@ -190,7 +200,22 @@ fn main() -> ExitCode {
         println!("flags:");
         println!("  {READ_BINARY}");
         println!("  {CASE_SENSITIVE}");
+        println!("  {MATCH_WHOLE_WORDS}");
+        println!("  {HELP}");
         return ExitCode::SUCCESS
+    }
+
+    let unicode_enabled = flag_parser.passed(&ENABLE_UNICODE);
+
+    #[cfg(feature = "hyperscan")]
+    if unicode_enabled {
+        eprintln!("hyperscan does not support unicode, use `regex` feature instead");
+        return ExitCode::FAILURE
+    }
+
+    if unicode_enabled && flag_parser.passed(&MATCH_WHOLE_WORDS) {
+        eprintln!("you can not match whole words with unicode support enabled");
+        return ExitCode::FAILURE
     }
 
     if args.len() < 3 {
@@ -199,13 +224,16 @@ fn main() -> ExitCode {
         return ExitCode::FAILURE
     }
 
-    let read_binary = flag_parser.passed(&READ_BINARY);
-    let case_sensitive = flag_parser.passed(&CASE_SENSITIVE);
-
     let Some(pattern_str) = nth_not_starting_with_dash(0, &args) else {
         return ExitCode::FAILURE
     };
-    let search_ctx = SearchCtx::new(pattern_str, read_binary, case_sensitive);
+
+    if !unicode_enabled && !pattern_str.is_ascii() {
+        eprintln!("if you want to match over unicode, enable unicode support with `-u` flag");
+        return ExitCode::FAILURE
+    }
+
+    let search_ctx = SearchCtx::new(&flag_parser, pattern_str);
 
     let Some(dir_path) = nth_not_starting_with_dash(1, &args) else {
         return ExitCode::FAILURE
@@ -214,12 +242,12 @@ fn main() -> ExitCode {
 
     dir.into_iter()
         .filter_map(|e| search_ctx.filter(e))
-        .filter_map(|(e, is_binary)| {
+        .filter_map(|(e, _)| {
             let file = File::open(&e).unwrap();
             let mmap = unsafe { Mmap::map(&file) }.ok()?;
-            Some((e, mmap, is_binary))
-        }).for_each(|(e, mmap, is_binary)| {
-            search_ctx.search(&mmap[..], e.as_path(), is_binary)
+            Some((e, mmap))
+        }).for_each(|(e, mmap)| {
+            search_ctx.search(&mmap[..], e.as_path())
         });
 
     ExitCode::SUCCESS
