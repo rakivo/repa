@@ -24,10 +24,10 @@ mod exts;
 use exts::*;
 
 const HELP: Flag = new_flag!("-h", "--help").help("print this text and exit");
-const READ_BINARY: Flag::<bool> = new_flag!("-b", "--read-binary", false).help("do not read binary files");
-const ENABLE_UNICODE: Flag::<bool> = new_flag!("-u", "--enable-unicode", false).help("enable unicode");
-const CASE_SENSITIVE: Flag::<bool> = new_flag!("-c", "--case-sensitive", false).help("do case sensitive search");
-const MATCH_WHOLE_WORDS: Flag::<bool> = new_flag!("-w", "--whole-words", false).help("match only whole words");
+const READ_BINARY: Flag = new_flag!("-b", "--read-binary").help("do not read binary files");
+const ENABLE_UNICODE: Flag = new_flag!("-u", "--enable-unicode").help("enable unicode");
+const CASE_SENSITIVE: Flag = new_flag!("-c", "--case-sensitive").help("do case sensitive search");
+const MATCH_WHOLE_WORDS: Flag = new_flag!("-w", "--whole-words").help("match only whole words");
 
 macro_rules! printdoc {
     (usage $program: expr) => {
