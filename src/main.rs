@@ -90,6 +90,8 @@ struct SearchCtx {
 }
 
 impl SearchCtx {
+    const MAXIMUM_PREVIEW_LEN: usize = 125;
+
     #[inline]
     fn new(flag_parser: &FlagParser, pattern_str: &str) -> Self {
         let read_binary = flag_parser.passed(&READ_BINARY);
@@ -146,9 +148,30 @@ impl SearchCtx {
         #[inline(always)]
         fn print_match(line_starts: &[usize], index: usize, file_path: &Path, haystack: &[u8]) {
             let (loc, line_number) = Loc::from_precomputed(&line_starts, index, file_path);
+
             let line_start = line_starts[line_number - 1];
-            let line_end = line_starts[line_number];
-            let preview = unsafe { std::str::from_utf8_unchecked(&haystack[line_start..line_end - 1]) };
+            let line_end = if line_number < line_starts.len() {
+                line_starts[line_number]
+            } else {
+                line_start + SearchCtx::MAXIMUM_PREVIEW_LEN.min(haystack.len())
+            };
+
+            let line_bytes = &haystack[line_start..line_end - 1];
+            let preview = match std::str::from_utf8(line_bytes) {
+                Ok(s) => {
+                    let mut ch_count = 0;
+                    let mut byte_count = 0;
+                    for ch in s.chars() {
+                        if ch_count >= SearchCtx::MAXIMUM_PREVIEW_LEN { break }
+                        byte_count += ch.len_utf8();
+                        ch_count += 1
+                    }
+                    &line_bytes[..byte_count]
+                }
+                Err(..) => b"<invalid UTF-8>"
+            };
+
+            let preview = unsafe { std::str::from_utf8_unchecked(preview) };
             println!("{loc}{preview}")
         }
 
