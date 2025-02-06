@@ -15,7 +15,7 @@ regex = ["dep:regex-automata"]
 hyperscan = ["dep:hyperscan"]
 
 [dependencies]
-flager = "0.0.6"
+flager = "0.0.8"
 dir_rec = "0.1.2"
 memmap2 = "=0.9.5"
 phf = { version = "=0.11.2", features = ["macros"] }
