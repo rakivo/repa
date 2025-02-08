@@ -93,7 +93,7 @@ impl SearchCtx {
     const MAXIMUM_PREVIEW_LEN: usize = 125;
 
     #[inline]
-    fn new(flag_parser: &FlagParser, pattern_str: &str) -> Self {
+    fn new(flag_parser: &FlagParser, pattern_str: &str) -> Result::<Self, String> {
         let read_binary = flag_parser.passed(&READ_BINARY);
         let case_sensitive = flag_parser.passed(&CASE_SENSITIVE);
         let match_whole_words = flag_parser.passed(&MATCH_WHOLE_WORDS);
@@ -109,9 +109,9 @@ impl SearchCtx {
             } else {
                 pattern!{pattern; SOM_LEFTMOST}
             };
-            let pattern_db = pattern.build().unwrap();
+            let pattern_db = pattern.build().map_err(|e| e.to_string())?;
             let scratch = pattern_db.alloc_scratch().unwrap();
-            SearchCtx { scratch, pattern_db, read_binary }
+            Ok(SearchCtx { scratch, pattern_db, read_binary })
         }
 
         #[cfg(feature = "regex")] {
@@ -125,8 +125,8 @@ impl SearchCtx {
                 .syntax(cfg)
                 .thompson(thompson::Config::new().reverse(true))
                 .build(&pattern)
-                .unwrap();
-            SearchCtx { dfa, read_binary }
+                .map_err(|e| e.to_string())?;
+            Ok(SearchCtx { dfa, read_binary })
         }
     }
 
@@ -256,7 +256,13 @@ fn main() -> ExitCode {
         return ExitCode::FAILURE
     }
 
-    let search_ctx = SearchCtx::new(&flag_parser, pattern_str);
+    let search_ctx = match SearchCtx::new(&flag_parser, pattern_str) {
+        Ok(ok) => ok,
+        Err(e) => {
+            eprintln!("could not compile {pattern_str:?}: {e}");
+            return ExitCode::FAILURE
+        }
+    };
 
     let Some(dir_path) = nth_not_starting_with_dash(1, &args) else {
         return ExitCode::FAILURE
