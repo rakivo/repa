@@ -1,10 +1,10 @@
-use std::env;
 use std::fs::File;
 use std::ops::Not;
+use std::{ptr, env};
 use std::fmt::Display;
+use std::io::{self, Read};
 use std::process::ExitCode;
 use std::path::{Path, PathBuf};
-use std::os::unix::ffi::OsStrExt;
 
 use memmap2::Mmap;
 use dir_rec::DirRec;
@@ -50,9 +50,13 @@ impl Display for Loc {
 
 impl Loc {
     #[inline(always)]
-    fn new(file_path: &Path, row: usize, col: usize) -> Self {
-        let file_path = file_path.display();
-        Self(format!("{file_path}:{row}:{col}:"))
+    fn new(file_path: Option::<&Path>, row: usize, col: usize) -> Self {
+        if let Some(f) = file_path {
+            let file_path = f.display();
+            Self(format!("{file_path}:{row}:{col}:"))
+        } else {
+            Self(format!("?:{row}:{col}:"))
+        }
     }
 
     // O(n)
@@ -65,7 +69,7 @@ impl Loc {
 
     // O(log lines_count)
     #[inline]
-    fn from_precomputed(line_starts: &[usize], index: usize, file_path: &Path) -> (Self, usize) {
+    fn from_precomputed(line_starts: &[usize], index: usize, file_path: Option::<&Path>) -> (Self, usize) {
         let (row, col, line_number) = if let Some(line_number) = line_starts.binary_search_by(|&start| start.cmp(&index)).err() {
             let line_start = line_starts[line_number - 1];
             (line_number, index - line_start + 1, line_number)
@@ -134,7 +138,7 @@ impl SearchCtx {
     fn filter(&self, e: PathBuf) -> Option::<(PathBuf, bool)> {
         let path = e.as_path();
         let is_binary = path.extension()
-            .map(|ext| BINARY_EXTENSIONS.contains(ext.as_bytes()))
+            .map(|ext| BINARY_EXTENSIONS.contains(ext.as_encoded_bytes()))
             .unwrap_or(true);
         if is_binary && !self.read_binary {
             None
@@ -144,9 +148,9 @@ impl SearchCtx {
     }
 
     #[inline]
-    fn search(&self, haystack: &[u8], path: &Path) {
+    fn search(&self, haystack: &[u8], path: Option::<&Path>) {
         #[inline(always)]
-        fn print_match(line_starts: &[usize], index: usize, file_path: &Path, haystack: &[u8]) {
+        fn print_match(line_starts: &[usize], index: usize, file_path: Option::<&Path>, haystack: &[u8]) {
             let (loc, line_number) = Loc::from_precomputed(&line_starts, index, file_path);
 
             let line_start = line_starts[line_number - 1];
@@ -213,6 +217,67 @@ fn nth_not_starting_with_dash(n: usize, args: &Vec::<String>) -> Option::<&Strin
     args[1..].iter().filter(|s| s.starts_with('-').not()).nth(n)
 }
 
+#[cfg(unix)]
+fn stdin_has_data() -> io::Result::<bool> {
+    use std::mem;
+    use libc::{select, timeval, FD_SET, FD_ZERO, FD_ISSET};
+
+    unsafe {
+        let mut fds = mem::zeroed();
+        let mut timeout = timeval {
+            tv_sec: 0,
+            tv_usec: 0,
+        };
+
+        let stdin_fd = libc::STDIN_FILENO;
+
+        FD_ZERO(&mut fds);
+        FD_SET(stdin_fd, &mut fds);
+
+        let ret = select(
+            stdin_fd + 1,
+            &mut fds,
+            ptr::null_mut(),
+            ptr::null_mut(),
+            &mut timeout
+        );
+
+        if ret == -1 {
+            return Err(io::Error::last_os_error())
+        }
+
+        Ok(FD_ISSET(stdin_fd, &fds))
+    }
+}
+
+#[cfg(windows)]
+fn stdin_has_data() -> io::Result<bool> {
+    use std::os::windows::io::AsRawHandle;
+    use winapi::um::namedpipeapi::PeekNamedPipe;
+    use winapi::um::handleapi::INVALID_HANDLE_VALUE;
+
+    unsafe {
+        let stdin_handle = io::stdin().as_raw_handle() as _;
+        if stdin_handle == INVALID_HANDLE_VALUE as _ {
+            return Err(io::Error::last_os_error())
+        }
+
+        let mut bytes_avail = 0;
+        if PeekNamedPipe(
+            stdin_handle,
+            ptr::null_mut(),
+            0,
+            ptr::null_mut(),
+            &mut bytes_avail,
+            ptr::null_mut(),
+        ) == 0 {
+            return Err(io::Error::last_os_error())
+        }
+
+        Ok(bytes_avail > 0)
+    }
+}
+
 fn main() -> ExitCode {
     let args = env::args().collect::<Vec::<_>>();
     let ref program = args[0];
@@ -241,13 +306,17 @@ fn main() -> ExitCode {
         return ExitCode::FAILURE
     }
 
-    if args.len() < 3 {
+    let stdin_is_empty = !stdin_has_data().expect("could not determine whether stdin is empty or not");
+
+    if args.len() < 3 && (args.len() != 2 && !stdin_is_empty) {
         printdoc!(usage program);
         printdoc!(example program);
         return ExitCode::FAILURE
     }
 
     let Some(pattern_str) = nth_not_starting_with_dash(0, &args) else {
+        printdoc!(usage program);
+        printdoc!(example program);
         return ExitCode::FAILURE
     };
 
@@ -264,20 +333,30 @@ fn main() -> ExitCode {
         }
     };
 
-    let Some(dir_path) = nth_not_starting_with_dash(1, &args) else {
-        return ExitCode::FAILURE
-    };
-    let dir = DirRec::new(dir_path);
+    if stdin_is_empty {
+        let Some(dir_path) = nth_not_starting_with_dash(1, &args) else {
+            return ExitCode::FAILURE
+        };
 
-    dir.into_iter()
-        .filter_map(|e| search_ctx.filter(e))
-        .filter_map(|(e, _)| {
-            let file = File::open(&e).unwrap();
-            let mmap = unsafe { Mmap::map(&file) }.ok()?;
-            Some((e, mmap))
-        }).for_each(|(e, mmap)| {
-            search_ctx.search(&mmap[..], e.as_path())
-        });
+        let dir = DirRec::new(dir_path);
+        dir.into_iter()
+            .filter_map(|e| search_ctx.filter(e))
+            .filter_map(|(e, _)| {
+                let file = File::open(&e).unwrap();
+                let mmap = unsafe { Mmap::map(&file) }.ok()?;
+                Some((e, mmap))
+            }).for_each(|(e, mmap)| {
+                search_ctx.search(&mmap[..], Some(e.as_path()))
+            })
+    } else {
+        let mut content = Vec::with_capacity(512);
+        if let Err(e) = io::stdin().read_to_end(&mut content) {
+            eprintln!("could not read data from stdin: {e}");
+            return ExitCode::FAILURE
+        }
+
+        search_ctx.search(&content, None)
+    }
 
     ExitCode::SUCCESS
 }
