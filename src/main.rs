@@ -74,7 +74,7 @@ impl Loc {
             let line_start = line_starts[line_number - 1];
             (line_number, index - line_start + 1, line_number)
         } else {
-            (1, index + 1, 1)
+            (1, 1, 1)
         };
         (Self::new(file_path, row, col), line_number)
     }
@@ -148,7 +148,7 @@ impl SearchCtx {
     }
 
     #[inline]
-    fn search(&self, haystack: &[u8], path: Option::<&Path>) {
+    fn search(&self, haystack: &[u8], path: Option::<&Path>) -> bool {
         #[inline(always)]
         fn print_match(line_starts: &[usize], index: usize, file_path: Option::<&Path>, haystack: &[u8]) {
             let (loc, line_number) = Loc::from_precomputed(&line_starts, index, file_path);
@@ -179,10 +179,12 @@ impl SearchCtx {
             println!("{loc}{preview}")
         }
 
+        let mut any_matches = false;
         let line_starts = Loc::precompute(haystack);
 
         #[cfg(feature = "hyperscan")] {
             self.pattern_db.scan(haystack, &self.scratch, |_, from, _, _| {
+                any_matches = true;
                 print_match(&line_starts, from as _, path, haystack);
                 Matching::Continue
             }).unwrap();
@@ -197,6 +199,7 @@ impl SearchCtx {
                 match result {
                     None => break,
                     Some(hm) => {
+                        any_matches = true;
                         print_match(&line_starts, hm.offset(), path, haystack);
                         if hm.offset() == 0 || input.end() == 0 {
                             break
@@ -208,7 +211,7 @@ impl SearchCtx {
                     }
                 }
             }
-        }
+        } any_matches
     }
 }
 
@@ -338,16 +341,21 @@ fn main() -> ExitCode {
             return ExitCode::FAILURE
         };
 
+        println!("[looking for '{pattern_str}']");
+
         let dir = DirRec::new(dir_path);
-        dir.into_iter()
+        if !dir.into_iter()
             .filter_map(|e| search_ctx.filter(e))
             .filter_map(|(e, _)| {
                 let file = File::open(&e).unwrap();
                 let mmap = unsafe { Mmap::map(&file) }.ok()?;
                 Some((e, mmap))
-            }).for_each(|(e, mmap)| {
+            }).any(|(e, mmap)| {
                 search_ctx.search(&mmap[..], Some(e.as_path()))
             })
+        {
+            println!("[no matches]")
+        }
     } else {
         let mut content = Vec::with_capacity(512);
         if let Err(e) = io::stdin().read_to_end(&mut content) {
@@ -355,7 +363,10 @@ fn main() -> ExitCode {
             return ExitCode::FAILURE
         }
 
-        search_ctx.search(&content, None)
+        println!("[looking for '{pattern_str}']");
+        if !search_ctx.search(&content, None) {
+            println!("[no matches]")
+        }
     }
 
     ExitCode::SUCCESS
