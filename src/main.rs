@@ -357,7 +357,7 @@ fn main() -> ExitCode {
                 }
             });
 
-        if any_matches {
+        if !any_matches {
             println!("[no matches]")
         }
     } else {
