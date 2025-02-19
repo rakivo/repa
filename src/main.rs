@@ -343,17 +343,21 @@ fn main() -> ExitCode {
 
         println!("[looking for '{pattern_str}']");
 
+        let mut any_matches = false;
         let dir = DirRec::new(dir_path);
-        if !dir.into_iter()
+        dir.into_iter()
             .filter_map(|e| search_ctx.filter(e))
             .filter_map(|(e, _)| {
                 let file = File::open(&e).unwrap();
                 let mmap = unsafe { Mmap::map(&file) }.ok()?;
                 Some((e, mmap))
-            }).any(|(e, mmap)| {
-                search_ctx.search(&mmap[..], Some(e.as_path()))
-            })
-        {
+            }).for_each(|(e, mmap)| {
+                if search_ctx.search(&mmap[..], Some(e.as_path())) {
+                    any_matches = true
+                }
+            });
+
+        if any_matches {
             println!("[no matches]")
         }
     } else {
